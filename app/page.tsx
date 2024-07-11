@@ -1,5 +1,4 @@
 'use client'
-
 import { useState } from 'react'
 import { useSession, signOut } from "next-auth/react"
 import { useRouter } from 'next/navigation'
@@ -25,15 +24,22 @@ export default function Home() {
       return
     }
 
+    if (!topic.trim()) {
+      alert('Please enter a topic')
+      return
+    }
+
     setProcessing(true)
     try {
+      console.log('Sending request to process videos...');
       const res = await fetch('/api/process', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ topic })
       })
       const data = await res.json()
-      alert(data.message)
+      console.log('Received response:', data);
+      alert(data.message || data.error || 'Unknown response from server')
     } catch (error) {
       console.error('Error:', error)
       alert('An error occurred during processing')

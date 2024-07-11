@@ -1,31 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from "next-auth/next"
+import { authOptions } from "@/auth"
 import { google, youtube_v3 } from 'googleapis';
 import UserModel from '@/models/userModel';
 import { connectToMongoDB } from '@/lib/db';
 
-// interface types {
-//   access_token: String;
-//   refresh_token: String;
-// }
-
 export async function POST(req: NextRequest) {
+  console.log('Received POST request to /api/process');
   await connectToMongoDB();
-  const session = await getServerSession()
+  const session = await getServerSession(authOptions)
+
+  console.log('Session:', JSON.stringify(session, null, 2));
 
   if (!session || !session.user?.email || !session.accessToken || !session.refreshToken) {
-    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    console.log('Authentication failed. Session:', JSON.stringify(session, null, 2));
+    return NextResponse.json({ error: 'Not authenticated', message: 'Authentication failed' }, { status: 401 })
   }
 
   const user = await UserModel.findOne({ email: session.user.email });
+  console.log('User:', user);
+
   if (!user || !user.accessToken) {
-    return NextResponse.json({ error: 'User not found or no access token' }, { status: 401 })
+    console.log('User not found or no access token');
+    return NextResponse.json({ error: 'User not found or no access token', message: 'User data error' }, { status: 401 })
   }
 
   const { topic } = await req.json()
+  console.log('Received topic:', topic);
 
   if (!topic) {
-    return NextResponse.json({ error: 'Topic is required' }, { status: 400 })
+    console.log('Missing topic');
+    return NextResponse.json({ error: 'Topic is required', message: 'Missing topic' }, { status: 400 })
   }
 
   const oauth2Client = new google.auth.OAuth2()
@@ -36,7 +41,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ message: 'YouTube video processing completed.' })
   } catch (error) {
     console.error('Error:', error)
-    return NextResponse.json({ error: 'An error occurred during processing' }, { status: 500 })
+    return NextResponse.json({ error: 'An error occurred during processing', message: 'Processing error' }, { status: 500 })
   }
 }
 
@@ -55,23 +60,32 @@ async function searchVideos(youtube: youtube_v3.Youtube, topic: string): Promise
 }
 
 async function getVideoDuration(youtube: youtube_v3.Youtube, videoId: string): Promise<number> {
+  console.log(`Getting duration for video: ${videoId}`);
   const response = await youtube.videos.list({
     part: ['contentDetails'],
     id: [videoId]
   });
 
   const videoDetails = response.data.items?.[0]?.contentDetails;
-  if (!videoDetails || !videoDetails.duration) return 0;
+  if (!videoDetails || !videoDetails.duration) {
+    console.log(`No duration found for video: ${videoId}`);
+    return 0;
+  }
 
   const duration = videoDetails.duration;
   const match = duration.match(/PT(\d+H)?(\d+M)?(\d+S)?/);
-  if (!match) return 0;
+  if (!match) {
+    console.log(`Invalid duration format for video: ${videoId}`);
+    return 0;
+  }
 
   const hours = parseInt(match[1]) || 0;
   const minutes = parseInt(match[2]) || 0;
   const seconds = parseInt(match[3]) || 0;
 
-  return (hours * 60 * 60 + minutes * 60 + seconds) * 1000; // Convert to milliseconds
+  const totalMilliseconds = (hours * 60 * 60 + minutes * 60 + seconds) * 1000;
+  console.log(`Video duration: ${totalMilliseconds / 1000} seconds`);
+  return totalMilliseconds;
 }
 
 async function performActions(youtube: youtube_v3.Youtube, video: youtube_v3.Schema$SearchResult, topic: string): Promise<number> {
@@ -87,68 +101,82 @@ async function performActions(youtube: youtube_v3.Youtube, video: youtube_v3.Sch
     console.log(`Processing video: "${videoTitle}" (ID: ${videoId})`);
 
     const videoDuration = await getVideoDuration(youtube, videoId);
-    console.log(`Video duration: ${videoDuration / 1000} seconds`);
 
     console.log('Liking the video...');
-    await youtube.videos.rate({
-      id: videoId,
-      rating: 'like'
-    });
+    try {
+      await youtube.videos.rate({
+        id: videoId,
+        rating: 'like'
+      });
+      console.log('Video liked successfully');
+    } catch (error) {
+      console.error('Error liking the video:', error);
+    }
 
     console.log('Commenting on the video...');
     const commentText = `Great ${topic} video!`;
-    await youtube.commentThreads.insert({
-      part: ['snippet'],
-      requestBody: {
-        snippet: {
-          videoId: videoId,
-          topLevelComment: {
-            snippet: {
-              textOriginal: commentText
-            }
-          }
-        }
-      }
-    });
-
-    console.log('Adding video to custom playlist...');
-    const playlistsResponse = await youtube.playlists.list({
-      part: ['snippet'],
-      mine: true
-    });
-
-    let playlistId = playlistsResponse.data.items?.find(item => item.snippet?.title === `My ${topic} Playlist`)?.id;
-
-    if (!playlistId) {
-      const newPlaylist = await youtube.playlists.insert({
+    try {
+      await youtube.commentThreads.insert({
         part: ['snippet'],
         requestBody: {
           snippet: {
-            title: `My ${topic} Playlist`,
-            description: `A custom playlist for ${topic} videos`
+            videoId: videoId,
+            topLevelComment: {
+              snippet: {
+                textOriginal: commentText
+              }
+            }
           }
         }
       });
-      playlistId = newPlaylist.data.id;
-      console.log(`Created new playlist: My ${topic} Playlist`);
+      console.log('Comment posted successfully');
+    } catch (error) {
+      console.error('Error posting comment:', error);
     }
 
-    if (playlistId) {
-      await youtube.playlistItems.insert({
+    console.log('Adding video to custom playlist...');
+    try {
+      const playlistsResponse = await youtube.playlists.list({
         part: ['snippet'],
-        requestBody: {
-          snippet: {
-            playlistId: playlistId,
-            resourceId: {
-              kind: 'youtube#video',
-              videoId: videoId
+        mine: true
+      });
+
+      let playlistId = playlistsResponse.data.items?.find(item => item.snippet?.title === `My ${topic} Playlist`)?.id;
+
+      if (!playlistId) {
+        console.log(`Creating new playlist: My ${topic} Playlist`);
+        const newPlaylist = await youtube.playlists.insert({
+          part: ['snippet'],
+          requestBody: {
+            snippet: {
+              title: `My ${topic} Playlist`,
+              description: `A custom playlist for ${topic} videos`
             }
           }
-        }
-      });
-      console.log('Video added to custom playlist successfully');
-    } else {
-      console.log('Failed to create or find custom playlist');
+        });
+        playlistId = newPlaylist.data.id;
+        console.log(`Created new playlist with ID: ${playlistId}`);
+      }
+
+      if (playlistId) {
+        await youtube.playlistItems.insert({
+          part: ['snippet'],
+          requestBody: {
+            snippet: {
+              playlistId: playlistId,
+              resourceId: {
+                kind: 'youtube#video',
+                videoId: videoId
+              }
+            }
+          }
+        });
+        console.log('Video added to custom playlist successfully');
+      } else {
+        console.log('Failed to create or find custom playlist');
+      }
+    } catch (error) {
+      console.error('Error handling playlist:', error);
     }
 
     return videoDuration;
@@ -193,6 +221,7 @@ async function subscribeToChannel(youtube: youtube_v3.Youtube, channelId: string
 }
 
 async function processVideos(auth: any, topic: string) {
+  console.log(`Starting to process videos for topic: ${topic}`);
   const youtube = google.youtube({ version: 'v3', auth });
   const totalWatchTimeLimit = 30 * 60 * 60 * 1000; // 30 hours in milliseconds
   let totalWatchTime = 0;
@@ -206,7 +235,10 @@ async function processVideos(auth: any, topic: string) {
 
     const videos = await searchVideos(youtube, topic);
     for (let i = 0; i < videos.length; i++) {
-      if (totalWatchTime >= totalWatchTimeLimit) break;
+      if (totalWatchTime >= totalWatchTimeLimit) {
+        console.log('Reached total watch time limit. Stopping processing.');
+        break;
+      }
 
       console.log(`\nProcessing video ${i + 1} of ${videos.length}`);
       const watchTime = await performActions(youtube, videos[i], topic);
@@ -218,5 +250,6 @@ async function processVideos(auth: any, topic: string) {
     console.log(`\nFinished processing videos. Total watch time: ${totalWatchTime / (60 * 60 * 1000)} hours`);
   } catch (error) {
     console.error('Error processing videos:', error);
+    throw error; // Re-throw the error to be caught in the main function
   }
 }

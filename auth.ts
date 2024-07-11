@@ -5,7 +5,7 @@ import UserModel from "./models/userModel"
 import { authConfig } from "./auth.config"
 import { JWT } from "next-auth/jwt"
 
-export const config: NextAuthOptions = {
+export const authOptions: NextAuthOptions = {
   ...authConfig,
   providers: [
     GoogleProvider({
@@ -13,7 +13,9 @@ export const config: NextAuthOptions = {
       clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
       authorization: {
         params: {
-          scope: "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.channel-memberships.creator"
+          scope: "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/youtube.force-ssl https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.channel-memberships.creator",
+          access_type: "offline",
+          prompt: "consent"
         }
       }
     }),
@@ -35,28 +37,33 @@ export const config: NextAuthOptions = {
             });
           }
           
-          // Update access token
+          // Update access token and refresh token
           existingUser.accessToken = account.access_token || "";
           existingUser.refreshToken = account.refresh_token || "";
           await existingUser.save();
           
+          console.log("User saved with tokens:", {
+            accessToken: existingUser.accessToken ? "present" : "missing",
+            refreshToken: existingUser.refreshToken ? "present" : "missing"
+          });
           return true;
         } catch (error) {
-          console.log(error);
+          console.error("Error in signIn callback:", error);
           return false;
         }
       }
       
       return false;
     },
-    async jwt({token, account}: {token:JWT; account: Account | null }) {
-      if(account) {
+    async jwt({ token, account }: { token: JWT; account: Account | null }) {
+      if (account) {
         token.accessToken = account.access_token;
+        token.refreshToken = account.refresh_token;
       }
       return token;
     },
     
-    async session({ session, token }: {session: Session, token: any}) {
+    async session({ session, token }: { session: Session, token: any }) {
       session.accessToken = token.accessToken;
       session.refreshToken = token.refreshToken;
       return session;
@@ -64,4 +71,4 @@ export const config: NextAuthOptions = {
   },
 };
 
-export default NextAuth(config);
+export default NextAuth(authOptions);

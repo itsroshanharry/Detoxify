@@ -4,6 +4,7 @@ import { authOptions } from "@/auth"
 import { google, youtube_v3 } from 'googleapis';
 import UserModel from '@/models/userModel';
 import { connectToMongoDB } from '@/lib/db';
+import puppeteer from 'puppeteer';
 
 export async function POST(req: NextRequest) {
   console.log('Received POST request to /api/process');
@@ -73,15 +74,15 @@ async function getVideoDuration(youtube: youtube_v3.Youtube, videoId: string): P
   }
 
   const duration = videoDetails.duration;
-  const match = duration.match(/PT(\d+H)?(\d+M)?(\d+S)?/);
+  const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
   if (!match) {
     console.log(`Invalid duration format for video: ${videoId}`);
     return 0;
   }
 
-  const hours = parseInt(match[1]) || 0;
-  const minutes = parseInt(match[2]) || 0;
-  const seconds = parseInt(match[3]) || 0;
+  const hours = parseInt(match[1] || '0');
+  const minutes = parseInt(match[2] || '0');
+  const seconds = parseInt(match[3] || '0');
 
   const totalMilliseconds = (hours * 60 * 60 + minutes * 60 + seconds) * 1000;
   console.log(`Video duration: ${totalMilliseconds / 1000} seconds`);
@@ -101,6 +102,10 @@ async function performActions(youtube: youtube_v3.Youtube, video: youtube_v3.Sch
     console.log(`Processing video: "${videoTitle}" (ID: ${videoId})`);
 
     const videoDuration = await getVideoDuration(youtube, videoId);
+    const watchDuration = Math.min(videoDuration, 20 * 60 * 1000); // Watch for 20 minutes or the full duration, whichever is shorter
+
+    console.log('Watching the video...');
+    await watchVideo(videoId, watchDuration);
 
     console.log('Liking the video...');
     try {
@@ -179,12 +184,52 @@ async function performActions(youtube: youtube_v3.Youtube, video: youtube_v3.Sch
       console.error('Error handling playlist:', error);
     }
 
-    return videoDuration;
+    return watchDuration;
   } catch (error) {
     console.error('Error performing actions:', error);
     return 0;
   }
 }
+
+async function watchVideo(videoId: string, duration: number) {
+  let browser;
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      timeout: 60000, // 60 seconds for launching
+      protocolTimeout: Math.max(duration + 30000, 60000), // At least 60 seconds or duration + 30 seconds
+      executablePath: 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe', // Adjust if needed
+    });
+
+    const page = await browser.newPage();
+    await page.setDefaultNavigationTimeout(60000); // 60 seconds for navigation
+
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    console.log(`Navigating to ${videoUrl}`);
+    await page.goto(videoUrl, { waitUntil: 'networkidle0' });
+
+    console.log(`Watching video for ${duration / 1000} seconds`);
+    await page.evaluate((durationMs) => {
+      return new Promise((resolve) => {
+        setTimeout(resolve, durationMs);
+      });
+    }, duration);
+
+    console.log('Finished watching the video');
+  } catch (error) {
+    console.error('Error in watchVideo:', error);
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (closeError) {
+        console.error('Error closing browser:', closeError);
+      }
+    }
+  }
+}
+
 
 async function findBestChannels(youtube: youtube_v3.Youtube, topic: string, maxChannels: number = 5): Promise<string[]> {
   console.log(`Searching for best channels on topic: "${topic}"...`);
@@ -235,21 +280,19 @@ async function processVideos(auth: any, topic: string) {
 
     const videos = await searchVideos(youtube, topic);
     for (let i = 0; i < videos.length; i++) {
+      const video = videos[i];
+      console.log(`Processing video ${i + 1}/${videos.length}: ${video.snippet?.title}`);
+      const watchDuration = await performActions(youtube, video, topic);
+      totalWatchTime += watchDuration;
+
       if (totalWatchTime >= totalWatchTimeLimit) {
-        console.log('Reached total watch time limit. Stopping processing.');
+        console.log('Reached total watch time limit.');
         break;
       }
-
-      console.log(`\nProcessing video ${i + 1} of ${videos.length}`);
-      const watchTime = await performActions(youtube, videos[i], topic);
-      totalWatchTime += watchTime;
-
-      console.log(`Total watch time: ${totalWatchTime / (60 * 60 * 1000)} hours`);
     }
-
-    console.log(`\nFinished processing videos. Total watch time: ${totalWatchTime / (60 * 60 * 1000)} hours`);
+    console.log('Finished processing videos');
   } catch (error) {
     console.error('Error processing videos:', error);
-    throw error; // Re-throw the error to be caught in the main function
+    throw error;
   }
 }
